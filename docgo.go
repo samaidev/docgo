@@ -18,9 +18,16 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/samaidev/officecore/ooxml"
 )
 
 // Document 表示一个 Word 文档
+//
+// 文档有两种模式。New 创建的文档处于新建模式，内容来自 elements，
+// 保存时生成全新的包。OpenFile 打开的文档处于打开模式，src 中保存了
+// 原始包的全部部件，body 是可原地修改的正文 XML；保存时只重写正文，
+// 其余部件按原始字节复制，从而完整保留图片、样式、页眉页脚等内容。
 type Document struct {
 	title    string
 	author   string
@@ -34,6 +41,10 @@ type Document struct {
 	tocEnabled bool   // 是否生成目录
 	margins    PageMargins
 	pageSize   PageSize
+
+	// 保真编辑状态，仅在打开模式下非空，详见 edit.go。
+	src  *ooxml.Package // 原始包的全部部件
+	body string         // word/document.xml 的当前内容
 }
 
 // PageMargins 页边距（EMU，默认 1 inch = 914400）
