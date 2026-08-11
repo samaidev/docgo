@@ -32,6 +32,9 @@ type Document struct {
 	title    string
 	author   string
 	subject  string
+	keywords string
+	created  string
+	modified string
 	elements []Element
 	// 高级功能
 	template   string // 模板名
@@ -212,6 +215,18 @@ func (d *Document) Title() string { return d.title }
 // Author 获取作者
 func (d *Document) Author() string { return d.author }
 
+// Subject 获取主题
+func (d *Document) Subject() string { return d.subject }
+
+// Keywords 获取关键词
+func (d *Document) Keywords() string { return d.keywords }
+
+// Created 获取创建时间
+func (d *Document) Created() string { return d.created }
+
+// Modified 获取修改时间
+func (d *Document) Modified() string { return d.modified }
+
 // AddHeading 添加标题
 func (d *Document) AddHeading(text string, level int) *Heading {
 	if level < 1 { level = 1 }
@@ -335,6 +350,15 @@ func (d *Document) Paragraphs() []*Paragraph {
 		}
 	}
 	return ps
+}
+
+// Tables 提取文档中所有表格的文本，每个表格是一段以 \n 分隔行、
+// 以 \t 分隔单元格的字符串。借鉴 LibreOffice 对 w:tbl 的处理范式。
+func (d *Document) Tables() []string {
+	if d.body == "" {
+		return nil
+	}
+	return extractTables(d.body)
 }
 
 // Save 保存
@@ -651,6 +675,9 @@ func parseCoreProps(r io.Reader, doc *Document) {
 	if m := extractTag(s, "dc:title"); m != "" { doc.title = m }
 	if m := extractTag(s, "dc:creator"); m != "" { doc.author = m }
 	if m := extractTag(s, "dc:subject"); m != "" { doc.subject = m }
+	if m := extractTag(s, "cp:keywords"); m != "" { doc.keywords = m }
+	if m := extractTag(s, "dcterms:created"); m != "" { doc.created = m }
+	if m := extractTag(s, "dcterms:modified"); m != "" { doc.modified = m }
 }
 
 func parseDocumentXML(r io.Reader, doc *Document) {
@@ -662,25 +689,191 @@ func parseDocumentXML(r io.Reader, doc *Document) {
 	}
 }
 
+// extractParagraphs 借鉴 LibreOffice oox 的 w:p / w:r / w:t 分组范式：
+// 以 <w:p> 为一个段落单元，合并其中所有 <w:r>/<w:t> 的文本；
+// <w:tab> 转制表符，<w:br>/<w:cr> 转换行。
+// 表格（<w:tbl>）内的段落属于表格内容，由 extractTables 单独提取，
+// 因此此处先整体剔除表格块，避免正文段落与表格单元格文本重复。
 func extractParagraphs(xml string) []string {
+	xml = stripBlock(xml, "w:tbl")
 	var lines []string
-	inT := false
-	var cur strings.Builder
-	for i := 0; i < len(xml)-5; i++ {
-		if xml[i:i+4] == "<w:t" {
-			j := strings.Index(xml[i:], ">")
-			if j < 0 { break }
-			inT = true
-			i += j
-		} else if xml[i:i+6] == "</w:t>" && inT {
-			inT = false
-			lines = append(lines, cur.String())
-			cur.Reset()
-		} else if inT {
-			cur.WriteByte(xml[i])
-		}
+	// 仿 LibreOffice，按段落节点分组，而非按 run 拆行。
+	for _, block := range splitTopLevel(xml, "w:p") {
+		var b strings.Builder
+		writeRuns(block, &b)
+		lines = append(lines, b.String())
 	}
 	return lines
+}
+
+// stripBlock 删除 xml 中所有 <tag ...>...</tag> 块（含其全部内容），
+// 用于把表格等结构化内容从正文段落流中排除。
+func stripBlock(xml, tag string) string {
+	open := "<" + tag
+	closeTag := "</" + tag + ">"
+	for {
+		start := strings.Index(xml, open)
+		if start < 0 {
+			break
+		}
+		// 找一个匹配的闭合标签：跳过嵌套的同名开标签，按计数匹配。
+		depth := 0
+		pos := start
+		end := -1
+		for pos < len(xml) {
+			// 从开标签自身之后开始查找嵌套开标签，避免把当前开标签当成嵌套。
+			o := strings.Index(xml[pos+len(open):], open)
+			if o >= 0 {
+				o += len(open) // 换算回相对 pos 的偏移
+			}
+			c := strings.Index(xml[pos:], closeTag)
+			if c < 0 {
+				break
+			}
+			if o >= 0 && o < c {
+				// 嵌套的同名开标签，深度 +1。
+				depth++
+				pos += o + len(open)
+				continue
+			}
+			// 当前是闭合标签。
+			if depth == 0 {
+				end = pos + c + len(closeTag)
+				break
+			}
+			depth--
+			pos += c + len(closeTag)
+		}
+		if end < 0 {
+			break
+		}
+		xml = xml[:start] + xml[end:]
+	}
+	return xml
+}
+
+// writeRuns 把一个段落/文本块内的所有 <w:t> 文本、<w:tab>、<w:br>、<w:cr> 拼成纯文本。
+// 字段指令（<w:instrText>）不输出，仅保留结果文本。
+func writeRuns(block string, b *strings.Builder) {
+	i := 0
+	n := len(block)
+	for i < n {
+		if block[i] != '<' {
+			// 把当前位置到下一个 '<' 之间的纯文本写出（一定不在标签内）。
+			j := strings.IndexByte(block[i:], '<')
+			if j < 0 {
+				b.WriteString(block[i:])
+				break
+			}
+			b.WriteString(block[i : i+j])
+			i += j
+			continue
+		}
+		// block[i] == '<'：解析整个标签到 '>'。
+		j := strings.IndexByte(block[i:], '>')
+		if j < 0 {
+			break
+		}
+		gt := i + j // 指向 '>'
+		raw := block[i+1 : gt]
+		tag := strings.TrimSpace(raw)
+		if strings.HasSuffix(tag, "/") {
+			tag = tag[:len(tag)-1]
+		}
+		switch {
+		case tag == "w:tab":
+			b.WriteByte('\t')
+			i = gt + 1
+		case tag == "w:br" || tag == "w:cr":
+			b.WriteByte('\n')
+			i = gt + 1
+		case tag == "w:t" || strings.HasPrefix(tag, "w:t "):
+			// 提取 <w:t> ... </w:t> 之间的字符数据。
+			after := gt + 1
+			closeAt := strings.Index(block[after:], "</w:t>")
+			if closeAt < 0 {
+				i = n
+				continue
+			}
+			b.WriteString(block[after : after+closeAt])
+			i = after + closeAt + len("</w:t>")
+		default:
+			// 其他标签（w:r、w:pPr、w:tcPr 等）整体跳过。
+			i = gt + 1
+		}
+	}
+}
+
+
+
+// splitTopLevel 按指定标签把 xml 切成顶层节点内容（不含外层标签）。
+// 标签名匹配是边界敏感的：例如标签 "w:p" 不会误匹配 "w:pPr"（段落属性）。
+func splitTopLevel(xml, tag string) []string {
+	open := "<" + tag
+	closeTag := "</" + tag + ">"
+	var out []string
+	for {
+		start := strings.Index(xml, open)
+		if start < 0 {
+			break
+		}
+		// 边界检查：标签名后必须是 '>'、空格、'/' 或换行/制表，
+		// 避免把 <w:pPr>（段落属性）误当成 <w:p>（段落）。
+		after := start + len(open)
+		if after < len(xml) {
+			c := xml[after]
+			if c != '>' && c != ' ' && c != '/' && c != '\t' && c != '\n' && c != '\r' {
+				// 不是目标标签，跳过这段继续找。
+				xml = xml[after:]
+				continue
+			}
+		}
+		// 跳到标签结束：可能是自闭合 "/>" 或普通 ">"。
+		gt := strings.Index(xml[start:], ">")
+		if gt < 0 {
+			break
+		}
+		// 自闭合标签 <w:p .../>：无内容，记录空块后跳过。
+		if xml[start+gt-1] == '/' {
+			out = append(out, "")
+			xml = xml[start+gt+1:]
+			continue
+		}
+		bodyStart := start + gt + 1
+		end := strings.Index(xml[bodyStart:], closeTag)
+		if end < 0 {
+			break
+		}
+		out = append(out, xml[bodyStart:bodyStart+end])
+		xml = xml[bodyStart+end+len(closeTag):]
+	}
+	return out
+}
+
+// indexTagEnd 返回从 i（指向 '<'）开始的标签结束位置 '>' 的下标。
+func indexTagEnd(s string, i int) int {
+	return strings.Index(s[i:], ">")
+}
+
+// extractTables 提取文档中所有表格，行用 \n 分隔，单元格用 \t 分隔。
+func extractTables(xml string) []string {
+	var tables []string
+	for _, tbl := range splitTopLevel(xml, "w:tbl") {
+		var rows []string
+		for _, tr := range splitTopLevel(tbl, "w:tr") {
+			var cells []string
+			for _, tc := range splitTopLevel(tr, "w:tc") {
+				var b strings.Builder
+				writeRuns(tc, &b)
+				cells = append(cells, strings.ReplaceAll(b.String(), "\n", " "))
+			}
+			rows = append(rows, strings.Join(cells, "\t"))
+		}
+		if len(rows) > 0 {
+			tables = append(tables, strings.Join(rows, "\n"))
+		}
+	}
+	return tables
 }
 
 func extractTag(xml, tag string) string {

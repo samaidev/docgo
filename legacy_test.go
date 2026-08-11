@@ -243,17 +243,34 @@ func TestExtractTextJoinsMultiplePieces(t *testing.T) {
 
 func TestCleanDocText(t *testing.T) {
 	cases := map[string]string{
-		"段落一\r段落二":      "段落一\n段落二",
-		"单元格\a分隔":       "单元格\t分隔",
-		"软\v换行":         "软\n换行",
-		"含\x01图片锚点":     "含图片锚点",
-		"含\x05控制字符":     "含控制字符",
-		"  首尾空白  ":      "首尾空白",
+		"段落一\r段落二":           "段落一\n段落二",
+		"单元格\a分隔":            "单元格\t分隔",
+		"软\v换行":              "软\n换行",
+		"含\x01图片锚点":          "含图片锚点",
+		"含\x05控制字符":          "含控制字符",
+		"  首尾空白  ":           "首尾空白",
+		"不间断\u00A0空格":         "不间断 空格", // 0x00A0 不间断空格 → 普通空格
+		// 字段 0x13/0x14/0x15：指令被跳过，仅保留结果文本。
+		string([]rune{0x13, 'P', 'A', 'G', 'E', 0x14, '7', 0x15}): "7",
+		// 0x0B 软回车 → 换行。
+		"行一\x0B行二": "行一\n行二",
 	}
 	for in, want := range cases {
 		if got := cleanDocText(in); got != want {
 			t.Errorf("cleanDocText(%q) = %q，期望 %q", in, got, want)
 		}
+	}
+}
+
+// TestParseFIBRejectsEncrypted 验证加密的 .doc 文件被拒绝
+// （FIB 第 0 位 fEncrypted 置位，与 LibreOffice 一致）。
+func TestParseFIBRejectsEncrypted(t *testing.T) {
+	wd := buildFIB(false, 0x800, 100, 50, 60)
+	// 置位 fEncrypted（bit 0）。
+	binary.LittleEndian.PutUint16(wd[0x0A:], 0x0001)
+
+	if _, err := parseFIB(wd); err == nil {
+		t.Error("加密文件应被拒绝")
 	}
 }
 

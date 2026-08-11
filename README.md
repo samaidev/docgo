@@ -59,6 +59,21 @@ text, _ := d.Text()          // 提取全部文本
 docxBytes, _ := d.ToDocx()   // 转换为现代 .docx
 ```
 
+读取逻辑借鉴 LibreOffice WW8 的解析范式：正确处理段落标记、单元格分隔、软回车、
+不间断空格，以及 Word 字段（如目录/页码域）只保留结果文本；加密（受密码保护）的
+`.doc` 文件会被明确拒绝。
+
+## 只读读取（借鉴 LibreOffice OOXML 解析范式）
+
+`.docx` 读取按 `w:p`/`w:r`/`w:t` 分组提取文本，并区分正文段落与表格：
+
+```go
+doc, _ := docgo.OpenFile("report.docx")
+ps := doc.Paragraphs()   // 结构化段落（不含表格单元格文本）
+tables := doc.Tables()   // 每个表格为 "行1\t行1列2\n行2\t行2列2" 形式
+title := doc.Title()     // 文档属性：标题/作者/主题/关键词/创建时间等
+```
+
 > 设计约束：旧版 Office 文件仅支持读取，编辑请使用现代 `.docx` 格式。
 
 ## 许可证

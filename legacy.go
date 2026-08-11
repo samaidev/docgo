@@ -119,8 +119,11 @@ func parseFIB(wd []byte) (*fib, error) {
 
 	f := &fib{}
 
-	// 偏移 0x000A 处的标志位字段，第 9 位为 fWhichTblStm。
+	// 偏移 0x000A 处的标志位字段，第 0 位为 fEncrypted，第 9 位为 fWhichTblStm。
 	flags := binary.LittleEndian.Uint16(wd[0x0A:])
+	if flags&0x0001 != 0 {
+		return nil, fmt.Errorf("docgo: 不支持读取加密（受密码保护）的 .doc 文件")
+	}
 	f.whichTableStream = flags&0x0200 != 0
 
 	// 偏移 0x0018 为 fcMin，正文起始位置。
@@ -315,18 +318,42 @@ func fallbackText(wd []byte, f *fib) string {
 //
 // Word 用 \r 表示段落结束，并以若干控制字符标记单元格边界、
 // 图片锚点、域代码等内容，这些都需要转换或剔除。
+// cleanDocText 清理 Word 97-2003 的二进制正文字符流。
+//
+// 借鉴 LibreOffice ww8 对控制字符的处理：
+//   - 0x0D 段落结束 → 换行
+//   - 0x07 单元格分隔 → 制表符
+//   - 0x0B 软换行 → 换行
+//   - 0x09 制表符 → 原样保留
+//   - 0xA0 不间断空格 → 普通空格（Word 用 0xA0 表示 Non-breaking space）
+//   - 0x01/0x02 图片锚点与脚注引用 → 忽略
+//   - 字段 0x13(begin)/0x14(separate)/0x15(end)：跳过 begin..separate 之间
+//     的指令文本，仅保留 separate..end 之间的结果文本（如目录、页码域的结果）。
+//   - 其余控制字符与符号字体私用区码点一律剔除。
 func cleanDocText(s string) string {
 	var sb strings.Builder
 	sb.Grow(len(s))
 
+	// 字段状态：0=普通文本；1=在字段指令内（0x13 后、0x14 前）；2=在字段结果内。
+	fieldState := 0
 	for _, r := range s {
 		switch {
+		case r == 0x13: // field begin
+			fieldState = 1
+		case r == 0x14: // field separate（结果开始）
+			fieldState = 2
+		case r == 0x15: // field end
+			fieldState = 0
+		case fieldState == 1:
+			// 字段指令文本（如 "PAGE"、"TOC"），无输出价值。
 		case r == '\r':
 			sb.WriteRune('\n') // 段落结束
 		case r == '\a':
 			sb.WriteRune('\t') // 单元格分隔
 		case r == '\v':
 			sb.WriteRune('\n') // 软换行
+		case r == 0xA0:
+			sb.WriteRune(' ') // 不间断空格
 		case r == '\t' || r == '\n':
 			sb.WriteRune(r)
 		case r == 0x01 || r == 0x02:

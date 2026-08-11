@@ -65,6 +65,63 @@ func TestRunStyling(t *testing.T) {
 	if r.size != 14 { t.Error("size not set") }
 }
 
+// TestExtractParagraphsWithTable 验证含表格与自闭合空段落的文档
+// 能被正确解析（借鉴 LibreOffice 的 w:p / w:r / w:t 分组范式）。
+func TestExtractParagraphsWithTable(t *testing.T) {
+	// 表格位于 <w:body> 最前、且首段为自闭合空段落 <w:p .../> 的情形。
+	xml := `<w:document><w:body>` +
+		`<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w="4428"/></w:tcPr>` +
+		`<w:p w:rsidR="1"><w:r><w:t>CellA</w:t></w:r></w:p></w:tc>` +
+		`<w:tc><w:p w:rsidR="2"><w:r><w:t>CellB</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+		`<w:p w:rsidR="3"><w:r><w:t>Para</w:t><w:tab/></w:r><w:r><w:t>End</w:t></w:r></w:p>` +
+		`<w:p w:rsidR="4"/>` + // 自闭合空段落
+		`</w:body></w:document>`
+
+	paras := extractParagraphs(xml)
+	// 表格内的单元格段落应被排除（见 extractTables），自闭合空段落产生空字符串，
+	// 因此过滤后只应有 1 条非空正文段落。
+	var nonEmpty []string
+	for _, p := range paras {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) != 1 {
+		t.Fatalf("non-empty paragraphs = %d, want 1 (got %q)", len(nonEmpty), paras)
+	}
+	if nonEmpty[0] != "Para\tEnd" {
+		t.Errorf("P0 = %q, want 'Para\\tEnd'", nonEmpty[0])
+	}
+
+	tables := extractTables(xml)
+	if len(tables) != 1 {
+		t.Fatalf("tables = %d, want 1", len(tables))
+	}
+	if tables[0] != "CellA\tCellB" {
+		t.Errorf("table = %q, want 'CellA\\tCellB'", tables[0])
+	}
+}
+
+func TestTables(t *testing.T) {
+	// 构造含表格的 document.xml 并验证 Tables() 公开 API。
+	xml := `<w:document><w:body>` +
+		`<w:p><w:r><w:t>前言</w:t></w:r></w:p>` +
+		`<w:tbl><w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>` +
+		`<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>` +
+		`<w:tr><w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>` +
+		`<w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+		`</w:body></w:document>`
+
+	doc := &Document{body: xml}
+	tables := doc.Tables()
+	if len(tables) != 1 {
+		t.Fatalf("tables = %d, want 1", len(tables))
+	}
+	if tables[0] != "A1\tB1\nA2\tB2" {
+		t.Errorf("table = %q, want 'A1\\tB1\\nA2\\tB2'", tables[0])
+	}
+}
+
 func TestBytes(t *testing.T) {
 	doc := New()
 	doc.AddHeading("H1", 1)
